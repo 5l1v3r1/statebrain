@@ -6,6 +6,7 @@ import (
 	"github.com/unixpickle/autofunc"
 	"github.com/unixpickle/num-analysis/linalg"
 	"github.com/unixpickle/serializer"
+	"github.com/unixpickle/weakai/neuralnet"
 	"github.com/unixpickle/weakai/rnn"
 )
 
@@ -67,39 +68,37 @@ func (b *Block) Batch(in *rnn.BlockInput) rnn.BlockOutput {
 		StateVecs:  make([]linalg.Vector, len(in.Inputs)),
 	}
 
-	var softmax autofunc.Softmax
-	for i, inputVec := range in.Inputs {
-		inSoftmax := softmax.Apply(inputVec)
-		var input int
-		var maxValue float64
-		for j, x := range inSoftmax.Output() {
-			if x >= maxValue {
-				maxValue = x
-				input = j
+	var softmax neuralnet.LogSoftmaxLayer
+	for i, state := range in.States {
+		input := maxIndex(in.Inputs[i].Output())
+
+		// The initial state is always the zero vector.
+		if allZeroes(state.Output()) {
+			state = b.initialState()
+		}
+
+		var output autofunc.Result
+		var newStates autofunc.Result
+		for stateIdx, entry := range b.Entries {
+			outputs := softmax.Apply(entry.Output)
+			transitions := softmax.Apply(entry.Transitions[input])
+
+			probLog := autofunc.Slice(state, stateIdx, stateIdx+1)
+			scaledOut := autofunc.AddFirst(outputs, probLog)
+			scaledStates := autofunc.AddFirst(transitions, probLog)
+
+			if output == nil {
+				output = scaledOut
+				newStates = scaledStates
+			} else {
+				output = autofunc.AddLogDomain(output, scaledOut)
+				newStates = autofunc.AddLogDomain(newStates, scaledStates)
 			}
 		}
 
-		stateProbs := softmax.Apply(in.States[i])
-		res := autofunc.Pool(stateProbs, func(inState autofunc.Result) autofunc.Result {
-			var output autofunc.Result
-			var newStates autofunc.Result
-			for stateIdx, entry := range b.Entries {
-				prob := autofunc.Slice(inState, stateIdx, stateIdx+1)
-				scaledOut := autofunc.ScaleFirst(entry.Output, prob)
-				scaledStates := autofunc.ScaleFirst(entry.Transitions[input], prob)
-				if output == nil {
-					output = scaledOut
-					newStates = scaledStates
-				} else {
-					output = autofunc.Add(output, scaledOut)
-					newStates = autofunc.Add(newStates, scaledOut)
-				}
-			}
-			return autofunc.Concat(output, newStates)
-		})
-		out.OutputRes[i] = autofunc.Slice(res, 0, len(inputVec.Output()))
+		out.OutputRes[i] = output
 		out.OutputVecs[i] = out.OutputRes[i].Output()
-		out.StateRes[i] = autofunc.Slice(res, len(inputVec.Output()), len(res.Output()))
+		out.StateRes[i] = newStates
 		out.StateVecs[i] = out.StateRes[i].Output()
 	}
 
@@ -117,42 +116,38 @@ func (b *Block) BatchR(v autofunc.RVector, in *rnn.BlockRInput) rnn.BlockROutput
 		StateVecsR:  make([]linalg.Vector, len(in.Inputs)),
 	}
 
-	var softmax autofunc.Softmax
-	for i, inputVec := range in.Inputs {
-		inSoftmax := softmax.ApplyR(v, inputVec)
-		var input int
-		var maxValue float64
-		for j, x := range inSoftmax.Output() {
-			if x >= maxValue {
-				maxValue = x
-				input = j
+	var softmax neuralnet.LogSoftmaxLayer
+	for i, state := range in.States {
+		input := maxIndex(in.Inputs[i].Output())
+
+		// The initial state is always the zero vector.
+		if allZeroes(state.Output()) {
+			state = b.initialStateR()
+		}
+
+		var output autofunc.RResult
+		var newStates autofunc.RResult
+		for stateIdx, entry := range b.Entries {
+			outputs := softmax.ApplyR(v, autofunc.NewRVariable(entry.Output, v))
+			transitions := softmax.ApplyR(v, autofunc.NewRVariable(entry.Transitions[input], v))
+
+			probLog := autofunc.SliceR(state, stateIdx, stateIdx+1)
+			scaledOut := autofunc.AddFirstR(outputs, probLog)
+			scaledStates := autofunc.AddFirstR(transitions, probLog)
+
+			if output == nil {
+				output = scaledOut
+				newStates = scaledStates
+			} else {
+				output = autofunc.AddLogDomainR(output, scaledOut)
+				newStates = autofunc.AddLogDomainR(newStates, scaledStates)
 			}
 		}
 
-		stateProbs := softmax.ApplyR(v, in.States[i])
-		res := autofunc.PoolR(stateProbs, func(inState autofunc.RResult) autofunc.RResult {
-			var output autofunc.RResult
-			var newStates autofunc.RResult
-			for stateIdx, entry := range b.Entries {
-				prob := autofunc.SliceR(inState, stateIdx, stateIdx+1)
-				outVar := autofunc.NewRVariable(entry.Output, v)
-				scaledOut := autofunc.ScaleFirstR(outVar, prob)
-				transVar := autofunc.NewRVariable(entry.Transitions[input], v)
-				scaledStates := autofunc.ScaleFirstR(transVar, prob)
-				if output == nil {
-					output = scaledOut
-					newStates = scaledStates
-				} else {
-					output = autofunc.AddR(output, scaledOut)
-					newStates = autofunc.AddR(newStates, scaledOut)
-				}
-			}
-			return autofunc.ConcatR(output, newStates)
-		})
-		out.OutputRes[i] = autofunc.SliceR(res, 0, len(inputVec.Output()))
+		out.OutputRes[i] = output
 		out.OutputVecs[i] = out.OutputRes[i].Output()
 		out.OutputVecsR[i] = out.OutputRes[i].ROutput()
-		out.StateRes[i] = autofunc.SliceR(res, len(inputVec.Output()), len(res.Output()))
+		out.StateRes[i] = newStates
 		out.StateVecs[i] = out.StateRes[i].Output()
 		out.StateVecsR[i] = out.StateRes[i].ROutput()
 	}
@@ -180,6 +175,23 @@ func (b *Block) SerializerType() string {
 // Serialize serializes this block.
 func (b *Block) Serialize() ([]byte, error) {
 	return json.Marshal(b)
+}
+
+// initialState returns the initial state variable.
+func (b *Block) initialState() *autofunc.Variable {
+	// Start at the first state with almost 100% chance.
+	// Perfect accuracy (100% probability) would lead to
+	// -Infinity values in the log probability vector.
+	nonLogProbs := make(linalg.Vector, len(b.Entries))
+	nonLogProbs[0] = 100
+	softmax := neuralnet.LogSoftmaxLayer{}
+	return &autofunc.Variable{
+		Vector: softmax.Apply(&autofunc.Variable{Vector: nonLogProbs}).Output(),
+	}
+}
+
+func (b *Block) initialStateR() *autofunc.RVariable {
+	return autofunc.NewRVariable(b.initialState(), autofunc.RVector{})
 }
 
 type blockOutput struct {
