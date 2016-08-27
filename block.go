@@ -1,10 +1,18 @@
 package statebrain
 
 import (
+	"encoding/json"
+
 	"github.com/unixpickle/autofunc"
 	"github.com/unixpickle/num-analysis/linalg"
+	"github.com/unixpickle/serializer"
 	"github.com/unixpickle/weakai/rnn"
 )
+
+func init() {
+	var b Block
+	serializer.RegisterTypedDeserializer(b.SerializerType(), DeserializeBlock)
+}
 
 // A StateEntry represents one fuzzy Markov state in
 // a bigger statebrain model.
@@ -16,6 +24,15 @@ type StateEntry struct {
 // A Block is an rnn.Block for the statebrain model.
 type Block struct {
 	Entries []StateEntry
+}
+
+// DeserializeBlock deserializes a Block.
+func DeserializeBlock(d []byte) (*Block, error) {
+	var res Block
+	if err := json.Unmarshal(d, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 // NewBlock creates a Block with the given alphabet size
@@ -152,6 +169,17 @@ func (b *Block) Parameters() []*autofunc.Variable {
 		res = append(res, e.Transitions...)
 	}
 	return res
+}
+
+// SerializerType returns the unique ID used to serialize
+// this block with the serializer package.
+func (b *Block) SerializerType() string {
+	return "github.com/unixpickle/statebrain.Block"
+}
+
+// Serialize serializes this block.
+func (b *Block) Serialize() ([]byte, error) {
+	return json.Marshal(b)
 }
 
 type blockOutput struct {
