@@ -89,6 +89,71 @@ func (b *Block) Batch(in *rnn.BlockInput) rnn.BlockOutput {
 	return out
 }
 
+// BatchR is like Batch but with r-operator support.
+func (b *Block) BatchR(v autofunc.RVector, in *rnn.BlockRInput) rnn.BlockROutput {
+	out := &blockROutput{
+		OutputRes:   make([]autofunc.RResult, len(in.Inputs)),
+		StateRes:    make([]autofunc.RResult, len(in.Inputs)),
+		OutputVecs:  make([]linalg.Vector, len(in.Inputs)),
+		StateVecs:   make([]linalg.Vector, len(in.Inputs)),
+		OutputVecsR: make([]linalg.Vector, len(in.Inputs)),
+		StateVecsR:  make([]linalg.Vector, len(in.Inputs)),
+	}
+
+	var softmax autofunc.Softmax
+	for i, inputVec := range in.Inputs {
+		inSoftmax := softmax.ApplyR(v, inputVec)
+		var input int
+		var maxValue float64
+		for j, x := range inSoftmax.Output() {
+			if x >= maxValue {
+				maxValue = x
+				input = j
+			}
+		}
+
+		stateProbs := softmax.ApplyR(v, in.States[i])
+		res := autofunc.PoolR(stateProbs, func(inState autofunc.RResult) autofunc.RResult {
+			var output autofunc.RResult
+			var newStates autofunc.RResult
+			for stateIdx, entry := range b.Entries {
+				prob := autofunc.SliceR(inState, stateIdx, stateIdx+1)
+				outVar := autofunc.NewRVariable(entry.Output, v)
+				scaledOut := autofunc.ScaleFirstR(outVar, prob)
+				transVar := autofunc.NewRVariable(entry.Transitions[input], v)
+				scaledStates := autofunc.ScaleFirstR(transVar, prob)
+				if output == nil {
+					output = scaledOut
+					newStates = scaledStates
+				} else {
+					output = autofunc.AddR(output, scaledOut)
+					newStates = autofunc.AddR(newStates, scaledOut)
+				}
+			}
+			return autofunc.ConcatR(output, newStates)
+		})
+		out.OutputRes[i] = autofunc.SliceR(res, 0, len(inputVec.Output()))
+		out.OutputVecs[i] = out.OutputRes[i].Output()
+		out.OutputVecsR[i] = out.OutputRes[i].ROutput()
+		out.StateRes[i] = autofunc.SliceR(res, len(inputVec.Output()), len(res.Output()))
+		out.StateVecs[i] = out.StateRes[i].Output()
+		out.StateVecsR[i] = out.StateRes[i].ROutput()
+	}
+
+	return out
+}
+
+// Parameters returns all of the variables involved in
+// this model.
+func (b *Block) Parameters() []*autofunc.Variable {
+	var res []*autofunc.Variable
+	for _, e := range b.Entries {
+		res = append(res, e.Output)
+		res = append(res, e.Transitions...)
+	}
+	return res
+}
+
 type blockOutput struct {
 	OutputRes  []autofunc.Result
 	StateRes   []autofunc.Result
@@ -113,6 +178,45 @@ func (b *blockOutput) Gradient(u *rnn.UpstreamGradient, g autofunc.Gradient) {
 	if u.States != nil {
 		for i, state := range b.StateRes {
 			state.PropagateGradient(u.States[i], g)
+		}
+	}
+}
+
+type blockROutput struct {
+	OutputRes   []autofunc.RResult
+	StateRes    []autofunc.RResult
+	OutputVecs  []linalg.Vector
+	StateVecs   []linalg.Vector
+	OutputVecsR []linalg.Vector
+	StateVecsR  []linalg.Vector
+}
+
+func (b *blockROutput) States() []linalg.Vector {
+	return b.StateVecs
+}
+
+func (b *blockROutput) RStates() []linalg.Vector {
+	return b.StateVecsR
+}
+
+func (b *blockROutput) Outputs() []linalg.Vector {
+	return b.OutputVecs
+}
+
+func (b *blockROutput) ROutputs() []linalg.Vector {
+	return b.OutputVecsR
+}
+
+func (b *blockROutput) RGradient(u *rnn.UpstreamRGradient, rg autofunc.RGradient,
+	g autofunc.Gradient) {
+	if u.Outputs != nil {
+		for i, output := range b.OutputRes {
+			output.PropagateRGradient(u.Outputs[i], u.ROutputs[i], rg, g)
+		}
+	}
+	if u.States != nil {
+		for i, state := range b.StateRes {
+			state.PropagateRGradient(u.States[i], u.RStates[i], rg, g)
 		}
 	}
 }
