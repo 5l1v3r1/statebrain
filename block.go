@@ -2,6 +2,7 @@ package statebrain
 
 import (
 	"encoding/json"
+	"math/rand"
 
 	"github.com/unixpickle/autofunc"
 	"github.com/unixpickle/num-analysis/linalg"
@@ -54,10 +55,16 @@ func NewBlock(alphabetSize, stateCount int) *Block {
 		res.Entries[i].Output = &autofunc.Variable{
 			Vector: make(linalg.Vector, alphabetSize),
 		}
+		for j := range res.Entries[i].Output.Vector {
+			res.Entries[i].Output.Vector[j] = rand.NormFloat64()
+		}
 		res.Entries[i].Transitions = make([]*autofunc.Variable, alphabetSize)
 		for j := range res.Entries[i].Transitions {
 			res.Entries[i].Transitions[j] = &autofunc.Variable{
 				Vector: make(linalg.Vector, stateCount),
+			}
+			for k := range res.Entries[i].Transitions[j].Vector {
+				res.Entries[i].Transitions[j].Vector[k] = rand.NormFloat64() * 2
 			}
 		}
 	}
