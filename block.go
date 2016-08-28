@@ -59,6 +59,16 @@ func (b *Block) StateSize() int {
 	return len(b.Entries)
 }
 
+// StartState returns the initial state.
+func (b *Block) StartState() autofunc.Result {
+	return b.initialState()
+}
+
+// StartStateR returns the initial state.
+func (b *Block) StartStateR(rv autofunc.RVector) autofunc.RResult {
+	return b.initialStateR()
+}
+
 // Batch applies the block to a batch of input vectors.
 func (b *Block) Batch(in *rnn.BlockInput) rnn.BlockOutput {
 	out := &blockOutput{
@@ -71,12 +81,6 @@ func (b *Block) Batch(in *rnn.BlockInput) rnn.BlockOutput {
 	var softmax neuralnet.LogSoftmaxLayer
 	for i, state := range in.States {
 		input := maxIndex(in.Inputs[i].Output())
-
-		// The initial state is always the zero vector.
-		if allZeroes(state.Output()) {
-			state = b.initialState()
-		}
-
 		var output autofunc.Result
 		var newStates autofunc.Result
 		for stateIdx, entry := range b.Entries {
@@ -119,12 +123,6 @@ func (b *Block) BatchR(v autofunc.RVector, in *rnn.BlockRInput) rnn.BlockROutput
 	var softmax neuralnet.LogSoftmaxLayer
 	for i, state := range in.States {
 		input := maxIndex(in.Inputs[i].Output())
-
-		// The initial state is always the zero vector.
-		if allZeroes(state.Output()) {
-			state = b.initialStateR()
-		}
-
 		var output autofunc.RResult
 		var newStates autofunc.RResult
 		for stateIdx, entry := range b.Entries {
