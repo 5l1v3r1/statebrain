@@ -24,7 +24,8 @@ type StateEntry struct {
 
 // A Block is an rnn.Block for the statebrain model.
 type Block struct {
-	Entries []StateEntry
+	StartVar *autofunc.Variable
+	Entries  []StateEntry
 }
 
 // DeserializeBlock deserializes a Block.
@@ -39,7 +40,16 @@ func DeserializeBlock(d []byte) (*Block, error) {
 // NewBlock creates a Block with the given alphabet size
 // and number of states.
 func NewBlock(alphabetSize, stateCount int) *Block {
-	res := &Block{Entries: make([]StateEntry, stateCount)}
+	res := &Block{
+		Entries: make([]StateEntry, stateCount),
+		StartVar: &autofunc.Variable{
+			Vector: make(linalg.Vector, stateCount),
+		},
+	}
+
+	// Make the first state much more likely.
+	res.StartVar.Vector[0] = 100
+
 	for i := range res.Entries {
 		res.Entries[i].Output = &autofunc.Variable{
 			Vector: make(linalg.Vector, alphabetSize),
@@ -59,14 +69,16 @@ func (b *Block) StateSize() int {
 	return len(b.Entries)
 }
 
-// StartState returns the initial state.
+// StartState returns the initial state distribution.
 func (b *Block) StartState() autofunc.Result {
-	return b.initialState()
+	softmax := neuralnet.LogSoftmaxLayer{}
+	return softmax.Apply(b.StartVar)
 }
 
 // StartStateR returns the initial state.
 func (b *Block) StartStateR(rv autofunc.RVector) autofunc.RResult {
-	return b.initialStateR()
+	softmax := neuralnet.LogSoftmaxLayer{}
+	return softmax.ApplyR(rv, autofunc.NewRVariable(b.StartVar, rv))
 }
 
 // Batch applies the block to a batch of input vectors.
@@ -156,7 +168,7 @@ func (b *Block) BatchR(v autofunc.RVector, in *rnn.BlockRInput) rnn.BlockROutput
 // Parameters returns all of the variables involved in
 // this model.
 func (b *Block) Parameters() []*autofunc.Variable {
-	var res []*autofunc.Variable
+	res := []*autofunc.Variable{b.StartVar}
 	for _, e := range b.Entries {
 		res = append(res, e.Output)
 		res = append(res, e.Transitions...)
@@ -173,23 +185,6 @@ func (b *Block) SerializerType() string {
 // Serialize serializes this block.
 func (b *Block) Serialize() ([]byte, error) {
 	return json.Marshal(b)
-}
-
-// initialState returns the initial state variable.
-func (b *Block) initialState() *autofunc.Variable {
-	// Start at the first state with almost 100% chance.
-	// Perfect accuracy (100% probability) would lead to
-	// -Infinity values in the log probability vector.
-	nonLogProbs := make(linalg.Vector, len(b.Entries))
-	nonLogProbs[0] = 100
-	softmax := neuralnet.LogSoftmaxLayer{}
-	return &autofunc.Variable{
-		Vector: softmax.Apply(&autofunc.Variable{Vector: nonLogProbs}).Output(),
-	}
-}
-
-func (b *Block) initialStateR() *autofunc.RVariable {
-	return autofunc.NewRVariable(b.initialState(), autofunc.RVector{})
 }
 
 type blockOutput struct {
