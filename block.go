@@ -256,14 +256,14 @@ func (b *blockResult) PropagateGradient(u []linalg.Vector, s []rnn.StateGrad,
 	return rnn.PropagateVecStatePool(g, b.Pool, func() {
 		if u != nil {
 			for i, output := range b.OutputRes {
-				output.PropagateGradient(u[i], g)
+				output.PropagateGradient(copyVec(u[i]), g)
 			}
 		}
 		if s != nil {
 			for i, state := range b.StateRes {
 				if s[i] != nil {
 					ups := linalg.Vector(s[i].(rnn.VecStateGrad))
-					state.PropagateGradient(ups, g)
+					state.PropagateGradient(copyVec(ups), g)
 				}
 			}
 		}
@@ -296,16 +296,21 @@ func (b *blockRResult) PropagateRGradient(u, uR []linalg.Vector, s []rnn.RStateG
 	return rnn.PropagateVecRStatePool(rg, g, b.Pool, func() {
 		if u != nil {
 			for i, output := range b.OutputRes {
-				output.PropagateRGradient(u[i], uR[i], rg, g)
+				output.PropagateRGradient(copyVec(u[i]), copyVec(uR[i]), rg, g)
 			}
 		}
 		if s != nil {
 			for i, state := range b.StateRes {
 				if s[i] != nil {
 					ups := s[i].(rnn.VecRStateGrad)
-					state.PropagateRGradient(ups.State, ups.RState, rg, g)
+					state.PropagateRGradient(copyVec(ups.State),
+						copyVec(ups.RState), rg, g)
 				}
 			}
 		}
 	})
+}
+
+func copyVec(x linalg.Vector) linalg.Vector {
+	return append(linalg.Vector{}, x...)
 }
