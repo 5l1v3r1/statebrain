@@ -16,6 +16,14 @@ func init() {
 	serializer.RegisterTypedDeserializer(b.SerializerType(), DeserializeBlock)
 }
 
+type blockState struct {
+	State autofunc.Result
+}
+
+type blockRState struct {
+	RState autofunc.RResult
+}
+
 // A StateEntry represents one fuzzy Markov state in
 // a bigger statebrain model.
 type StateEntry struct {
@@ -71,35 +79,60 @@ func NewBlock(alphabetSize, stateCount int) *Block {
 	return res
 }
 
-// StateSize returns the number of states.
-func (b *Block) StateSize() int {
-	return len(b.Entries)
-}
-
 // StartState returns the initial state distribution.
-func (b *Block) StartState() autofunc.Result {
+func (b *Block) StartState() rnn.State {
 	softmax := neuralnet.LogSoftmaxLayer{}
-	return softmax.Apply(b.StartVar)
+	return blockState{State: softmax.Apply(b.StartVar)}
 }
 
 // StartStateR returns the initial state.
-func (b *Block) StartStateR(rv autofunc.RVector) autofunc.RResult {
+func (b *Block) StartRState(rv autofunc.RVector) rnn.RState {
 	softmax := neuralnet.LogSoftmaxLayer{}
-	return softmax.ApplyR(rv, autofunc.NewRVariable(b.StartVar, rv))
+	res := softmax.ApplyR(rv, autofunc.NewRVariable(b.StartVar, rv))
+	return blockRState{
+		RState: res,
+	}
 }
 
-// Batch applies the block to a batch of input vectors.
-func (b *Block) Batch(in *rnn.BlockInput) rnn.BlockOutput {
-	out := &blockOutput{
-		OutputRes:  make([]autofunc.Result, len(in.Inputs)),
-		StateRes:   make([]autofunc.Result, len(in.Inputs)),
-		OutputVecs: make([]linalg.Vector, len(in.Inputs)),
-		StateVecs:  make([]linalg.Vector, len(in.Inputs)),
+// PropagateStart performs back-propagation through the
+// start state.
+func (b *Block) PropagateStart(s []rnn.State, u []rnn.StateGrad, grad autofunc.Gradient) {
+	for i, g := range u {
+		res := s[i].(blockState).State
+		vec := g.(rnn.VecStateGrad)
+		res.PropagateGradient(linalg.Vector(vec), grad)
+	}
+}
+
+// PropagateStartR is like PropagateStart, but for an
+// RStateGrad.
+// The g argument may be nil.
+func (b *Block) PropagateStartR(s []rnn.RState, u []rnn.RStateGrad, rg autofunc.RGradient,
+	g autofunc.Gradient) {
+	for i, sgObj := range u {
+		res := s[i].(blockRState).RState
+		sg := sgObj.(rnn.VecRStateGrad)
+		res.PropagateRGradient(sg.State, sg.RState, rg, g)
+	}
+}
+
+// ApplyBlock applies the block to a batch of inputs.
+func (b *Block) ApplyBlock(s []rnn.State, in []autofunc.Result) rnn.BlockResult {
+	out := &blockResult{
+		Pool:       make([]*autofunc.Variable, len(in)),
+		OutputRes:  make([]autofunc.Result, len(in)),
+		StateRes:   make([]autofunc.Result, len(in)),
+		OutputVecs: make([]linalg.Vector, len(in)),
+		StatesOut:  make([]rnn.State, len(in)),
 	}
 
 	var softmax neuralnet.LogSoftmaxLayer
-	for i, state := range in.States {
-		input := maxIndex(in.Inputs[i].Output())
+	for i, rawState := range s {
+		out.Pool[i] = &autofunc.Variable{
+			Vector: rawState.(blockState).State.Output(),
+		}
+		state := out.Pool[i]
+		input := maxIndex(in[i].Output())
 		var output autofunc.Result
 		var newStates autofunc.Result
 		for stateIdx, entry := range b.Entries {
@@ -122,26 +155,35 @@ func (b *Block) Batch(in *rnn.BlockInput) rnn.BlockOutput {
 		out.OutputRes[i] = output
 		out.OutputVecs[i] = out.OutputRes[i].Output()
 		out.StateRes[i] = newStates
-		out.StateVecs[i] = out.StateRes[i].Output()
+		out.StatesOut[i] = blockState{State: out.StateRes[i]}
 	}
 
 	return out
 }
 
-// BatchR is like Batch but with r-operator support.
-func (b *Block) BatchR(v autofunc.RVector, in *rnn.BlockRInput) rnn.BlockROutput {
-	out := &blockROutput{
-		OutputRes:   make([]autofunc.RResult, len(in.Inputs)),
-		StateRes:    make([]autofunc.RResult, len(in.Inputs)),
-		OutputVecs:  make([]linalg.Vector, len(in.Inputs)),
-		StateVecs:   make([]linalg.Vector, len(in.Inputs)),
-		OutputVecsR: make([]linalg.Vector, len(in.Inputs)),
-		StateVecsR:  make([]linalg.Vector, len(in.Inputs)),
+// ApplyBlockR is like ApplyBlock, but with support for
+// the R operator.
+func (b *Block) ApplyBlockR(v autofunc.RVector, s []rnn.RState,
+	in []autofunc.RResult) rnn.BlockRResult {
+	out := &blockRResult{
+		Pool:        make([]*autofunc.Variable, len(s)),
+		OutputRes:   make([]autofunc.RResult, len(in)),
+		StateRes:    make([]autofunc.RResult, len(in)),
+		OutputVecs:  make([]linalg.Vector, len(in)),
+		OutputVecsR: make([]linalg.Vector, len(in)),
+		StatesOut:   make([]rnn.RState, len(in)),
 	}
 
 	var softmax neuralnet.LogSoftmaxLayer
-	for i, state := range in.States {
-		input := maxIndex(in.Inputs[i].Output())
+	for i, rawState := range s {
+		out.Pool[i] = &autofunc.Variable{
+			Vector: rawState.(blockRState).RState.Output(),
+		}
+		state := &autofunc.RVariable{
+			Variable:   out.Pool[i],
+			ROutputVec: rawState.(blockRState).RState.ROutput(),
+		}
+		input := maxIndex(in[i].Output())
 		var output autofunc.RResult
 		var newStates autofunc.RResult
 		for stateIdx, entry := range b.Entries {
@@ -165,8 +207,7 @@ func (b *Block) BatchR(v autofunc.RVector, in *rnn.BlockRInput) rnn.BlockROutput
 		out.OutputVecs[i] = out.OutputRes[i].Output()
 		out.OutputVecsR[i] = out.OutputRes[i].ROutput()
 		out.StateRes[i] = newStates
-		out.StateVecs[i] = out.StateRes[i].Output()
-		out.StateVecsR[i] = out.StateRes[i].ROutput()
+		out.StatesOut[i] = blockRState{RState: out.StateRes[i]}
 	}
 
 	return out
@@ -194,69 +235,77 @@ func (b *Block) Serialize() ([]byte, error) {
 	return json.Marshal(b)
 }
 
-type blockOutput struct {
+type blockResult struct {
+	Pool       []*autofunc.Variable
 	OutputRes  []autofunc.Result
 	StateRes   []autofunc.Result
 	OutputVecs []linalg.Vector
-	StateVecs  []linalg.Vector
+	StatesOut  []rnn.State
 }
 
-func (b *blockOutput) States() []linalg.Vector {
-	return b.StateVecs
+func (b *blockResult) States() []rnn.State {
+	return b.StatesOut
 }
 
-func (b *blockOutput) Outputs() []linalg.Vector {
+func (b *blockResult) Outputs() []linalg.Vector {
 	return b.OutputVecs
 }
 
-func (b *blockOutput) Gradient(u *rnn.UpstreamGradient, g autofunc.Gradient) {
-	if u.Outputs != nil {
-		for i, output := range b.OutputRes {
-			output.PropagateGradient(u.Outputs[i], g)
+func (b *blockResult) PropagateGradient(u []linalg.Vector, s []rnn.StateGrad,
+	g autofunc.Gradient) []rnn.StateGrad {
+	return rnn.PropagateVecStatePool(g, b.Pool, func() {
+		if u != nil {
+			for i, output := range b.OutputRes {
+				output.PropagateGradient(u[i], g)
+			}
 		}
-	}
-	if u.States != nil {
-		for i, state := range b.StateRes {
-			state.PropagateGradient(u.States[i], g)
+		if s != nil {
+			for i, state := range b.StateRes {
+				if s[i] != nil {
+					ups := linalg.Vector(s[i].(rnn.VecStateGrad))
+					state.PropagateGradient(ups, g)
+				}
+			}
 		}
-	}
+	})
 }
 
-type blockROutput struct {
+type blockRResult struct {
+	Pool        []*autofunc.Variable
 	OutputRes   []autofunc.RResult
 	StateRes    []autofunc.RResult
 	OutputVecs  []linalg.Vector
-	StateVecs   []linalg.Vector
 	OutputVecsR []linalg.Vector
-	StateVecsR  []linalg.Vector
+	StatesOut   []rnn.RState
 }
 
-func (b *blockROutput) States() []linalg.Vector {
-	return b.StateVecs
+func (b *blockRResult) RStates() []rnn.RState {
+	return b.StatesOut
 }
 
-func (b *blockROutput) RStates() []linalg.Vector {
-	return b.StateVecsR
-}
-
-func (b *blockROutput) Outputs() []linalg.Vector {
+func (b *blockRResult) Outputs() []linalg.Vector {
 	return b.OutputVecs
 }
 
-func (b *blockROutput) ROutputs() []linalg.Vector {
+func (b *blockRResult) ROutputs() []linalg.Vector {
 	return b.OutputVecsR
 }
 
-func (b *blockROutput) RGradient(u *rnn.UpstreamRGradient, rg autofunc.RGradient,
-	g autofunc.Gradient) {
-	if u.Outputs != nil {
-		for i, output := range b.OutputRes {
-			output.PropagateRGradient(u.Outputs[i], u.ROutputs[i], rg, g)
+func (b *blockRResult) PropagateRGradient(u, uR []linalg.Vector, s []rnn.RStateGrad,
+	rg autofunc.RGradient, g autofunc.Gradient) []rnn.RStateGrad {
+	return rnn.PropagateVecRStatePool(rg, g, b.Pool, func() {
+		if u != nil {
+			for i, output := range b.OutputRes {
+				output.PropagateRGradient(u[i], uR[i], rg, g)
+			}
 		}
-	}
-	if u.States != nil {
-		for i, state := range b.StateRes {
-			state.PropagateRGradient(u.States[i], u.RStates[i], rg, g)
+		if s != nil {
+			for i, state := range b.StateRes {
+				if s[i] != nil {
+					ups := s[i].(rnn.VecRStateGrad)
+					state.PropagateRGradient(ups.State, ups.RState, rg, g)
+				}
+			}
 		}
-	}
+	})
 }
